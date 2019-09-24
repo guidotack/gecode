@@ -393,7 +393,8 @@ AST::Node* arrayOutput(AST::Call* ann) {
 
 namespace Gecode { namespace FlatZinc {
 
-  FlatZincSpace* parse(const std::string& filename, Printer& p, std::ostream& err,
+  FlatZincSpace* parse(const std::string& filename, const FlatZincOptions& opt,
+                       Printer& p, std::ostream& err,
                        FlatZincSpace* fzs, Rnd& rnd) {
 #ifdef HAVE_MMAP
     int fd;
@@ -415,7 +416,7 @@ namespace Gecode { namespace FlatZinc {
     }
 
     if (fzs == NULL) {
-      fzs = new FlatZincSpace(rnd);
+      fzs = new FlatZincSpace(opt,&p,rnd);
     }
     ParserState pp(data, sbuf.st_size, err, fzs);
 #else
@@ -428,7 +429,7 @@ namespace Gecode { namespace FlatZinc {
     std::string s = string(istreambuf_iterator<char>(file),
                            istreambuf_iterator<char>());
     if (fzs == NULL) {
-      fzs = new FlatZincSpace(rnd);
+      fzs = new FlatZincSpace(opt,&p,rnd);
     }
     ParserState pp(s, err, fzs);
 #endif
@@ -443,13 +444,14 @@ namespace Gecode { namespace FlatZinc {
     return pp.hadError ? NULL : pp.fg;
   }
 
-  FlatZincSpace* parse(std::istream& is, Printer& p, std::ostream& err,
+  FlatZincSpace* parse(std::istream& is, const FlatZincOptions& opt,
+                       Printer& p, std::ostream& err,
                        FlatZincSpace* fzs, Rnd& rnd) {
     std::string s = string(istreambuf_iterator<char>(is),
                            istreambuf_iterator<char>());
 
     if (fzs == NULL) {
-      fzs = new FlatZincSpace(rnd);
+      fzs = new FlatZincSpace(opt,&p,rnd);
     }
     ParserState pp(s, err, fzs);
     yylex_init(&pp.yyscanner);

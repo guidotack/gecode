@@ -773,9 +773,15 @@ namespace Gecode { namespace FlatZinc {
 
   FlatZincSpace::FlatZincSpace(FlatZincSpace& f)
     : Space(f),
-      _initData(nullptr), _random(f._random),
-      _solveAnnotations(nullptr), iv_boolalias(nullptr),
+      _initData(nullptr), _opt(f._opt), _random(f._random),
+      _solveAnnotations(f._solveAnnotations),
+      _printer(f._printer),
+      iv_introduced(f.iv_introduced), iv_boolalias(nullptr), bv_introduced(f.bv_introduced),
+#ifdef GECODE_HAS_SET_VARS
+      sv_introduced(f.sv_introduced),
+#endif
 #ifdef GECODE_HAS_FLOAT_VARS
+      fv_introduced(f.fv_introduced),
       step(f.step),
 #endif
       needAuxVars(f.needAuxVars) {
@@ -783,6 +789,7 @@ namespace Gecode { namespace FlatZinc {
       _optVarIsInt = f._optVarIsInt;
       _method = f._method;
       _lns = f._lns;
+      _neighbourhoods = f._neighbourhoods;
       _lnsInitialSolution = f._lnsInitialSolution;
       branchInfo = f.branchInfo;
       iv.update(*this, f.iv);
@@ -843,12 +850,12 @@ namespace Gecode { namespace FlatZinc {
 #endif
     }
 
-  FlatZincSpace::FlatZincSpace(Rnd& random)
-  :  _initData(new FlatZincSpaceInitData),
+  FlatZincSpace::FlatZincSpace(const FlatZincOptions& opt, Printer* printer, Rnd& random)
+  :  _initData(new FlatZincSpaceInitData), _opt(new FlatZincOptions(opt)),
     intVarCount(-1), boolVarCount(-1), floatVarCount(-1), setVarCount(-1),
     _optVar(-1), _optVarIsInt(true), _lns(0), _lnsInitialSolution(0),
     _random(random),
-    _solveAnnotations(nullptr), needAuxVars(true) {
+    _solveAnnotations(nullptr), _printer(printer), needAuxVars(true) {
     branchInfo.init();
   }
 
@@ -1034,23 +1041,21 @@ namespace Gecode { namespace FlatZinc {
   }
 
   void
-  FlatZincSpace::createBranchers(Printer&p, AST::Node* ann, FlatZincOptions& opt,
-                                 bool ignoreUnknown,
+  FlatZincSpace::createBranchers(AST::Node* ann, FlatZincOptions& opt,
+                                 bool ignoreUnknown, bool populateNeighbourhoods,
                                  std::ostream& err) {
-    int seed = opt.seed();
     double decay = opt.decay();
-    Rnd rnd(static_cast<unsigned int>(seed));
-    TieBreak<IntVarBranch> def_int_varsel = INT_VAR_AFC_SIZE_MAX(0.99);
-    IntBoolVarBranch def_intbool_varsel = INTBOOL_VAR_AFC_SIZE_MAX(0.99);
+    TieBreak<IntVarBranch> def_int_varsel = INT_VAR_AFC_SIZE_MAX(decay);
+    IntBoolVarBranch def_intbool_varsel = INTBOOL_VAR_AFC_SIZE_MAX(decay);
     IntValBranch def_int_valsel = INT_VAL_MIN();
     std::string def_int_rel_left = "=";
     std::string def_int_rel_right = "!=";
-    TieBreak<BoolVarBranch> def_bool_varsel = BOOL_VAR_AFC_MAX(0.99);
+    TieBreak<BoolVarBranch> def_bool_varsel = BOOL_VAR_AFC_MAX(decay);
     BoolValBranch def_bool_valsel = BOOL_VAL_MIN();
     std::string def_bool_rel_left = "=";
     std::string def_bool_rel_right = "!=";
 #ifdef GECODE_HAS_SET_VARS
-    SetVarBranch def_set_varsel = SET_VAR_AFC_SIZE_MAX(0.99);
+    SetVarBranch def_set_varsel = SET_VAR_AFC_SIZE_MAX(decay);
     SetValBranch def_set_valsel = SET_VAL_MIN_INC();
     std::string def_set_rel_left = "in";
     std::string def_set_rel_right = "not in";
@@ -1086,6 +1091,10 @@ namespace Gecode { namespace FlatZinc {
         flattenAnnotations(ann->getArray()  , flatAnn);
       } else {
         flatAnn.push_back(ann);
+      }
+
+      if (populateNeighbourhoods) {
+        _neighbourhoods = std::make_shared<Neighbourhoods>();
       }
 
       for (unsigned int i=0; i<flatAnn.size(); i++) {
@@ -1153,19 +1162,25 @@ namespace Gecode { namespace FlatZinc {
           IntVarArgs va(k);
           std::vector<std::string> names;
           k=0;
+          std::vector<int> nbh;
           for (unsigned int i=0; i<vars->a.size(); i++) {
             if (vars->a[i]->isInt())
               continue;
             va[k++] = iv[vars->a[i]->getIntVar()];
+            if (populateNeighbourhoods)
+              nbh.push_back(vars->a[i]->getIntVar());
             iv_searched[vars->a[i]->getIntVar()] = true;
             names.push_back(vars->a[i]->getVarName());
+          }
+          if (populateNeighbourhoods && nbh.size() > 5) {
+            _neighbourhoods->n.push_back(Neighbourhood(nbh,true));
           }
           std::string r0, r1;
           {
             BrancherGroup bg;
             branch(bg(*this), va,
-                   ann2ivarsel(args->a[1],rnd,decay),
-                   ann2ivalsel(args->a[2],r0,r1,rnd),
+                   ann2ivarsel(args->a[1],_random,decay),
+                   ann2ivalsel(args->a[2],r0,r1,_random),
                    nullptr,
                    &varValPrint<IntVar>);
             branchInfo.add(bg,r0,r1,names);
@@ -1186,7 +1201,7 @@ namespace Gecode { namespace FlatZinc {
             va[k++] = iv[vars->a[i]->getIntVar()];
             iv_searched[vars->a[i]->getIntVar()] = true;
           }
-          assign(*this, va, ann2asnivalsel(args->a[1],rnd), nullptr,
+          assign(*this, va, ann2asnivalsel(args->a[1],_random), nullptr,
                 &varValPrint<IntVar>);
         } else if (flatAnn[i]->isCall("bool_search")) {
           AST::Call *call = flatAnn[i]->getCall("bool_search");
@@ -1199,20 +1214,25 @@ namespace Gecode { namespace FlatZinc {
           BoolVarArgs va(k);
           k=0;
           std::vector<std::string> names;
+          std::vector<int> nbh;
           for (unsigned int i=0; i<vars->a.size(); i++) {
             if (vars->a[i]->isBool())
               continue;
             va[k++] = bv[vars->a[i]->getBoolVar()];
+            if (populateNeighbourhoods)
+              nbh.push_back(vars->a[i]->getBoolVar());
             bv_searched[vars->a[i]->getBoolVar()] = true;
             names.push_back(vars->a[i]->getVarName());
           }
-
+          if (populateNeighbourhoods && nbh.size() > 5) {
+            _neighbourhoods->n.push_back(Neighbourhood(nbh,false));
+          }
           std::string r0, r1;
           {
             BrancherGroup bg;
             branch(bg(*this), va,
-                   ann2bvarsel(args->a[1],rnd,decay),
-                   ann2bvalsel(args->a[2],r0,r1,rnd),
+                   ann2bvarsel(args->a[1],_random,decay),
+                   ann2bvalsel(args->a[2],r0,r1,_random),
                    nullptr,
                    &varValPrint<BoolVar>);
             branchInfo.add(bg,r0,r1,names);
@@ -1220,16 +1240,16 @@ namespace Gecode { namespace FlatZinc {
         } else if (flatAnn[i]->isCall("int_default_search")) {
           AST::Call *call = flatAnn[i]->getCall("int_default_search");
           AST::Array *args = call->getArgs(2);
-          def_int_varsel = ann2ivarsel(args->a[0],rnd,decay);
+          def_int_varsel = ann2ivarsel(args->a[0],_random,decay);
           def_int_valsel = ann2ivalsel(args->a[1],
-                                       def_int_rel_left,def_int_rel_right,rnd);
+                                       def_int_rel_left,def_int_rel_right,_random);
         } else if (flatAnn[i]->isCall("bool_default_search")) {
           AST::Call *call = flatAnn[i]->getCall("bool_default_search");
           AST::Array *args = call->getArgs(2);
-          def_bool_varsel = ann2bvarsel(args->a[0],rnd,decay);
+          def_bool_varsel = ann2bvarsel(args->a[0],_random,decay);
           def_bool_valsel = ann2bvalsel(args->a[1],
                                         def_bool_rel_left,def_bool_rel_right,
-                                        rnd);
+                                        _random);
         } else if (flatAnn[i]->isCall("set_search")) {
 #ifdef GECODE_HAS_SET_VARS
           AST::Call *call = flatAnn[i]->getCall("set_search");
@@ -1253,8 +1273,8 @@ namespace Gecode { namespace FlatZinc {
           {
             BrancherGroup bg;
             branch(bg(*this), va,
-                   ann2svarsel(args->a[1],rnd,decay),
-                   ann2svalsel(args->a[2],r0,r1,rnd),
+                   ann2svarsel(args->a[1],_random,decay),
+                   ann2svalsel(args->a[2],r0,r1,_random),
                    nullptr,
                    &varValPrint<SetVar>);
             branchInfo.add(bg,r0,r1,names);
@@ -1270,9 +1290,9 @@ namespace Gecode { namespace FlatZinc {
 #ifdef GECODE_HAS_SET_VARS
           AST::Call *call = flatAnn[i]->getCall("set_default_search");
           AST::Array *args = call->getArgs(2);
-          def_set_varsel = ann2svarsel(args->a[0],rnd,decay);
+          def_set_varsel = ann2svarsel(args->a[0],_random,decay);
           def_set_valsel = ann2svalsel(args->a[1],
-                                       def_set_rel_left,def_set_rel_right,rnd);
+                                       def_set_rel_left,def_set_rel_right,_random);
 #else
           if (!ignoreUnknown) {
             err << "Warning, ignored search annotation: ";
@@ -1284,7 +1304,7 @@ namespace Gecode { namespace FlatZinc {
 #ifdef GECODE_HAS_FLOAT_VARS
           AST::Call *call = flatAnn[i]->getCall("float_default_search");
           AST::Array *args = call->getArgs(2);
-          def_float_varsel = ann2fvarsel(args->a[0],rnd,decay);
+          def_float_varsel = ann2fvarsel(args->a[0],_random,decay);
           def_float_valsel = ann2fvalsel(args->a[1],
                                          def_float_rel_left,def_float_rel_right);
 #else
@@ -1317,7 +1337,7 @@ namespace Gecode { namespace FlatZinc {
           {
             BrancherGroup bg;
             branch(bg(*this), va,
-                   ann2fvarsel(args->a[2],rnd,decay),
+                   ann2fvarsel(args->a[2],_random,decay),
                    ann2fvalsel(args->a[3],r0,r1),
                    nullptr,
                    &varValPrintF);
@@ -1362,11 +1382,11 @@ namespace Gecode { namespace FlatZinc {
         continue;
       if (iv_introduced[2*i]) {
         if (!iv_introduced[2*i+1]) {
-          iv_tmp_names[j] = p.intVarName(i);
+          iv_tmp_names[j] = _printer->intVarName(i);
           iv_tmp[j++] = iv[i];
         }
       } else {
-        iv_sol_names[k] = p.intVarName(i);
+        iv_sol_names[k] = _printer->intVarName(i);
         iv_sol[k++] = iv[i];
       }
     }
@@ -1394,11 +1414,11 @@ namespace Gecode { namespace FlatZinc {
         continue;
       if (bv_introduced[2*i]) {
         if (!bv_introduced[2*i+1]) {
-          bv_tmp_names[j] = p.boolVarName(i);
+          bv_tmp_names[j] = _printer->boolVarName(i);
           bv_tmp[j++] = bv[i];
         }
       } else {
-        bv_sol_names[k] = p.boolVarName(i);
+        bv_sol_names[k] = _printer->boolVarName(i);
         bv_sol[k++] = bv[i];
       }
     }
@@ -1440,11 +1460,11 @@ namespace Gecode { namespace FlatZinc {
         continue;
       if (fv_introduced[2*i]) {
         if (!fv_introduced[2*i+1]) {
-          fv_tmp_names[j] = p.floatVarName(i);
+          fv_tmp_names[j] = _printer->floatVarName(i);
           fv_tmp[j++] = fv[i];
         }
       } else {
-        fv_sol_names[k] = p.floatVarName(i);
+        fv_sol_names[k] = _printer->floatVarName(i);
         fv_sol[k++] = fv[i];
       }
     }
@@ -1480,11 +1500,11 @@ namespace Gecode { namespace FlatZinc {
         continue;
       if (sv_introduced[2*i]) {
         if (!sv_introduced[2*i+1]) {
-          sv_tmp_names[j] = p.setVarName(i);
+          sv_tmp_names[j] = _printer->setVarName(i);
           sv_tmp[j++] = sv[i];
         }
       } else {
-        sv_sol_names[k] = p.setVarName(i);
+        sv_sol_names[k] = _printer->setVarName(i);
         sv_sol[k++] = sv[i];
       }
     }
@@ -1508,6 +1528,44 @@ namespace Gecode { namespace FlatZinc {
     fv_aux = FloatVarArray(*this, fv_tmp);
     n_aux += fv_aux.size();
 #endif
+
+    if (_method == MIN) {
+      if (_optVarIsInt) {
+        std::vector<std::string> names(1);
+        names[0] = _printer->intVarName(_optVar);
+        BrancherGroup bg;
+        branch(bg(*this), iv[_optVar], INT_VAL_MIN(),
+               &varValPrint<IntVar>);
+        branchInfo.add(bg,"=","!=",names);
+      } else {
+#ifdef GECODE_HAS_FLOAT_VARS
+        std::vector<std::string> names(1);
+        names[0] = _printer->floatVarName(_optVar);
+        BrancherGroup bg;
+        branch(bg(*this), fv[_optVar], FLOAT_VAL_SPLIT_MIN(),
+               &varValPrintF);
+        branchInfo.add(bg,"<=",">",names);
+#endif
+      }
+    } else if (_method == MAX) {
+      if (_optVarIsInt) {
+        std::vector<std::string> names(1);
+        names[0] = _printer->intVarName(_optVar);
+        BrancherGroup bg;
+        branch(bg(*this), iv[_optVar], INT_VAL_MAX(),
+               &varValPrint<IntVar>);
+        branchInfo.add(bg,"=","!=",names);
+      } else {
+#ifdef GECODE_HAS_FLOAT_VARS
+        std::vector<std::string> names(1);
+        names[0] = _printer->floatVarName(_optVar);
+        BrancherGroup bg;
+        branch(bg(*this), fv[_optVar], FLOAT_VAL_SPLIT_MAX(),
+               &varValPrintF);
+        branchInfo.add(bg,"<=",">",names);
+#endif
+      }
+    }
 
     if (n_aux > 0) {
       if (_method == SAT) {
@@ -1553,55 +1611,17 @@ namespace Gecode { namespace FlatZinc {
       }
     }
 
-    if (_method == MIN) {
-      if (_optVarIsInt) {
-        std::vector<std::string> names(1);
-        names[0] = p.intVarName(_optVar);
-        BrancherGroup bg;
-        branch(bg(*this), iv[_optVar], INT_VAL_MIN(),
-               &varValPrint<IntVar>);
-        branchInfo.add(bg,"=","!=",names);
-      } else {
-#ifdef GECODE_HAS_FLOAT_VARS
-        std::vector<std::string> names(1);
-        names[0] = p.floatVarName(_optVar);
-        BrancherGroup bg;
-        branch(bg(*this), fv[_optVar], FLOAT_VAL_SPLIT_MIN(),
-               &varValPrintF);
-        branchInfo.add(bg,"<=",">",names);
-#endif
-      }
-    } else if (_method == MAX) {
-      if (_optVarIsInt) {
-        std::vector<std::string> names(1);
-        names[0] = p.intVarName(_optVar);
-        BrancherGroup bg;
-        branch(bg(*this), iv[_optVar], INT_VAL_MAX(),
-               &varValPrint<IntVar>);
-        branchInfo.add(bg,"=","!=",names);
-      } else {
-#ifdef GECODE_HAS_FLOAT_VARS
-        std::vector<std::string> names(1);
-        names[0] = p.floatVarName(_optVar);
-        BrancherGroup bg;
-        branch(bg(*this), fv[_optVar], FLOAT_VAL_SPLIT_MAX(),
-               &varValPrintF);
-        branchInfo.add(bg,"<=",">",names);
-#endif
-      }
-    }
-
   }
 
   AST::Array*
   FlatZincSpace::solveAnnotations(void) const {
-    return _solveAnnotations;
+    return _solveAnnotations.get();
   }
 
   void
   FlatZincSpace::solve(AST::Array* ann) {
     _method = SAT;
-    _solveAnnotations = ann;
+    _solveAnnotations = std::shared_ptr<AST::Array>(ann);
   }
 
   void
@@ -1609,7 +1629,7 @@ namespace Gecode { namespace FlatZinc {
     _method = MIN;
     _optVar = var;
     _optVarIsInt = isInt;
-    _solveAnnotations = ann;
+    _solveAnnotations = std::shared_ptr<AST::Array>(ann);
   }
 
   void
@@ -1617,12 +1637,11 @@ namespace Gecode { namespace FlatZinc {
     _method = MAX;
     _optVar = var;
     _optVarIsInt = isInt;
-    _solveAnnotations = ann;
+    _solveAnnotations = std::shared_ptr<AST::Array>(ann);
   }
 
   FlatZincSpace::~FlatZincSpace(void) {
     delete _initData;
-    delete _solveAnnotations;
   }
 
 #ifdef GECODE_HAS_GIST
@@ -1727,15 +1746,10 @@ namespace Gecode { namespace FlatZinc {
 
 #endif
 
-  template<template<class> class Engine>
+  template<template<class> class Engine, template<class> class Builder>
   void
-  FlatZincSpace::runEngine(std::ostream& out, const Printer& p,
-                           const FlatZincOptions& opt, Support::Timer& t_total) {
-    if (opt.restart()==RM_NONE) {
-      runMeta<Engine,Driver::EngineToMeta>(out,p,opt,t_total);
-    } else {
-      runMeta<Engine,RBS>(out,p,opt,t_total);
-    }
+  FlatZincSpace::runEngine(std::ostream& out, Support::Timer& t_total) {
+    runMeta<Engine,Builder>(out, t_total);
   }
 
 #ifdef GECODE_HAS_CPPROFILER
@@ -1815,15 +1829,13 @@ namespace Gecode { namespace FlatZinc {
 
 #endif
 
-  template<template<class> class Engine,
-           template<class,template<class> class> class Meta>
+  template<template<class> class Engine, template<class> class Builder>
   void
-  FlatZincSpace::runMeta(std::ostream& out, const Printer& p,
-                         const FlatZincOptions& opt, Support::Timer& t_total) {
+  FlatZincSpace::runMeta(std::ostream& out, Support::Timer& t_total) {
 #ifdef GECODE_HAS_GIST
     if (opt.mode() == SM_GIST) {
-      FZPrintingInspector<FlatZincSpace> pi(p);
-      FZPrintingComparator<FlatZincSpace> pc(p);
+      FZPrintingInspector<FlatZincSpace> pi(*_printer);
+      FZPrintingComparator<FlatZincSpace> pc(*_printer);
       (void) GistEngine<Engine<FlatZincSpace> >::explore(this,opt,&pi,&pc);
       return;
     }
@@ -1836,53 +1848,147 @@ namespace Gecode { namespace FlatZinc {
       n_p = PropagatorGroup::all.size(*this);
     }
     Search::Options o;
-    o.stop = Driver::CombinedStop::create(opt.node(), opt.fail(), opt.time(),
+    o.stop = Driver::CombinedStop::create(_opt->node(), _opt->fail(), _opt->time(),
                                           true);
-    o.c_d = opt.c_d();
-    o.a_d = opt.a_d();
-
 #ifdef GECODE_HAS_CPPROFILER
 
-    if (opt.mode() == SM_CPPROFILER) {
+    if (_opt->mode() == SM_CPPROFILER) {
       FlatZincGetInfo* getInfo = nullptr;
-      if (opt.profiler_info())
-        getInfo = new FlatZincGetInfo(p);
-      o.tracer = new CPProfilerSearchTracer(opt.profiler_id(),
-                                            opt.name(), opt.profiler_port(),
+      if (_opt->profiler_info())
+        getInfo = new FlatZincGetInfo(*_printer);
+      o.tracer = new CPProfilerSearchTracer(_opt->profiler_id(),
+                                            _opt->name(), _opt->profiler_port(),
                                             getInfo);
     }
 
 #endif
 
-#ifdef GECODE_HAS_FLOAT_VARS
-    step = opt.step();
+    unsigned int n_vars = 0;
+    for (unsigned int i=0; i<iv.size(); i++) {
+      if (!iv[i].assigned())
+        n_vars++;
+    }
+    for (unsigned int i=0; i<bv.size(); i++) {
+      if (!bv[i].assigned())
+        n_vars++;
+    }
+#ifdef GECODE_HAS_SET_VARS
+    for (unsigned int i=0; i<sv.size(); i++) {
+      if (!sv[i].assigned())
+        n_vars++;
+    }
 #endif
-    o.threads = opt.threads();
-    o.nogoods_limit = opt.nogoods() ? opt.nogoods_limit() : 0;
-    o.cutoff  = new Search::CutoffAppend(new Search::CutoffConstant(0), 1, Driver::createCutoff(opt));
-    if (opt.interrupt())
+#ifdef GECODE_HAS_FLOAT_VARS
+    for (unsigned int i=0; i<fv.size(); i++) {
+      if (!fv[i].assigned())
+        n_vars++;
+    }
+#endif
+    unsigned int c_d = n_vars > 50000 ? std::max(300u, _opt->c_d()) : _opt->c_d();
+    unsigned int a_d = n_vars > 50000 ? std::max(100u, _opt->a_d()) : _opt->a_d();
+    o.c_d = c_d;
+    o.a_d = a_d;
+
+    
+#ifdef GECODE_HAS_FLOAT_VARS
+    step = _opt->step();
+#endif
+    
+    // If we have n>=2 assets and m>=n threads:
+    // Asset 1: fixed search, single thread
+    // Asset 2: free search, m-1 threads if n=2, otherwise m-2 threads
+    // Asset 3: LNS, single thread
+    
+    
+    unsigned int asset_0_threads = 1;
+    unsigned int asset_1_threads = 1;
+    unsigned int n_assets=std::min(_opt->assets(), 3u);
+    if (_opt->free()) {
+      n_assets = std::max(n_assets, 3u);
+    }
+    if (n_assets<=1 || _opt->threads() < n_assets) {
+      n_assets = 1;
+      asset_0_threads = _opt->threads();
+    } else {
+      asset_1_threads = n_assets==2 ? _opt->threads()-1 : _opt->threads()-2;
+    }
+    o.threads = n_assets;
+    
+    o.nogoods_limit = _opt->nogoods() ? _opt->nogoods_limit() : 0;
+    o.cutoff  = new Search::CutoffAppend(new Search::CutoffConstant(0), 1, Driver::createCutoff(*_opt));
+    if (_opt->interrupt())
       Driver::CombinedStop::installCtrlHandler(true);
     {
-      Meta<FlatZincSpace,Engine> se(this,o);
-      int noOfSolutions = opt.solutions();
+
+      SEBs sebs(_opt->assets()>=2 ? (_opt->assets()==2 ? 2 : 3) : 1);
+      Search::Options o0;
+      Search::Options o1;
+      Search::Options o2;
+      if (_opt->assets()>=2) {
+        o0.c_d = c_d;
+        o0.a_d = a_d;
+        o0.threads = asset_0_threads;
+        o1.threads = asset_1_threads;
+        sebs[0] = new Builder<FlatZincSpace>(o0);
+        if (_opt->restart()==RM_NONE) {
+          o1.c_d = c_d;
+          o1.a_d = a_d;
+          sebs[1] = new Builder<FlatZincSpace>(o1);
+        } else {
+          o1.stop = Driver::CombinedStop::create(_opt->node(), _opt->fail(), _opt->time(),
+                                                 true);
+          o1.c_d = c_d;
+          o1.a_d = a_d;
+          o1.nogoods_limit = _opt->nogoods() ? _opt->nogoods_limit() : 0;
+          o1.cutoff  = new Search::CutoffAppend(new Search::CutoffConstant(200), 5, Driver::createCutoff(*_opt));
+          sebs[1] = rbs<FlatZincSpace,Engine>(o1);
+        }
+        if (_opt->assets()>=3) {
+          // Create LNS asset: single thread, constant cutoff
+          o2.stop = Driver::CombinedStop::create(_opt->node(), _opt->fail(), _opt->time(),
+                                                 true);
+          o2.c_d = c_d;
+          o2.a_d = a_d;
+          o2.threads = 1;
+          // o2.cutoff  = Search::Cutoff::luby(1000);
+          o2.cutoff = Search::Cutoff::constant(3000);
+          sebs[2] = rbs<FlatZincSpace,Engine>(o2);
+        }
+      } else {
+        o1.stop = Driver::CombinedStop::create(_opt->node(), _opt->fail(), _opt->time(),
+                                               true);
+        o1.c_d = c_d;
+        o1.a_d = a_d;
+        o1.threads = _opt->threads();
+        o1.nogoods_limit = _opt->nogoods() ? _opt->nogoods_limit() : 0;
+        o1.cutoff  = new Search::CutoffAppend(new Search::CutoffConstant(0), 1, Driver::createCutoff(*_opt));
+        if (_opt->restart()==RM_NONE) {
+          sebs[0] = new Builder<FlatZincSpace>(o1);
+        } else {
+          sebs[0] = rbs<FlatZincSpace,Engine>(o1);
+        }
+      }
+      PBS<FlatZincSpace> se(this, sebs, o);
+
+      int noOfSolutions = _opt->solutions();
       if (noOfSolutions == -1) {
         noOfSolutions = (_method == SAT) ? 1 : 0;
       }
-      bool printAll = _method == SAT || opt.allSolutions() || noOfSolutions != 0;
+      bool printAll = _method == SAT || _opt->allSolutions() || noOfSolutions != 0;
       int findSol = noOfSolutions;
       FlatZincSpace* sol = nullptr;
       while (FlatZincSpace* next_sol = se.next()) {
         delete sol;
         sol = next_sol;
         if (printAll) {
-          sol->print(out, p);
+          sol->print(out);
           out << "----------" << std::endl;
         }
         if (--findSol==0)
           goto stopped;
       }
       if (sol && !printAll) {
-        sol->print(out, p);
+        sol->print(out);
         out << "----------" << std::endl;
       }
       if (!se.stopped()) {
@@ -1896,9 +2002,9 @@ namespace Gecode { namespace FlatZinc {
       }
       delete sol;
       stopped:
-      if (opt.interrupt())
+      if (_opt->interrupt())
         Driver::CombinedStop::installCtrlHandler(false);
-      if (opt.mode() == SM_STAT) {
+      if (_opt->mode() == SM_STAT) {
         Gecode::Search::Statistics stat = se.statistics();
         double totalTime = (t_total.stop() / 1000.0);
         double solveTime = (t_solve.stop() / 1000.0);
@@ -1964,15 +2070,14 @@ namespace Gecode { namespace FlatZinc {
 #endif
 
   void
-  FlatZincSpace::run(std::ostream& out, const Printer& p,
-                      const FlatZincOptions& opt, Support::Timer& t_total) {
+  FlatZincSpace::run(std::ostream& out, Support::Timer& t_total) {
     switch (_method) {
     case MIN:
     case MAX:
-      runEngine<BAB>(out,p,opt,t_total);
+      runEngine<BAB,Search::BabBuilder>(out,t_total);
       break;
     case SAT:
-      runEngine<DFS>(out,p,opt,t_total);
+      runEngine<DFS,Search::DfsBuilder>(out,t_total);
       break;
     }
   }
@@ -2000,28 +2105,87 @@ namespace Gecode { namespace FlatZinc {
 
   bool
   FlatZincSpace::slave(const MetaInfo& mi) {
-    if ((mi.type() == MetaInfo::RESTART) && (mi.restart() != 0) &&
-        (_lns > 0) && (mi.last()==nullptr) && (_lnsInitialSolution.size()>0)) {
-      for (unsigned int i=iv_lns.size(); i--;) {
-        if (_random(99U) <= _lns) {
-          rel(*this, iv_lns[i], IRT_EQ, _lnsInitialSolution[i]);
-        }
+    if (mi.type() == MetaInfo::PORTFOLIO) {
+      if (mi.asset()==1) {
+        createBranchers(NULL, *_opt, false, mi.asset()==2, std::cerr);
+      } else {
+        createBranchers(solveAnnotations(), *_opt, false, mi.asset()==2, std::cerr);
       }
-      return false;
-    } else if ((mi.type() == MetaInfo::RESTART) && (mi.restart() != 0) &&
-               (_lns > 0) && mi.last()) {
-      const FlatZincSpace& last =
-        static_cast<const FlatZincSpace&>(*mi.last());
-      for (unsigned int i=iv_lns.size(); i--;) {
-        if (_random(99U) <= _lns) {
-          rel(*this, iv_lns[i], IRT_EQ, last.iv_lns[i]);
-        }
+      // initialise LNS
+      if (mi.asset() == 2) {
+        _lns = 85;
       }
-      return false;
+      _solveAnnotations = NULL;
+      iv_boolalias = NULL;
+      iv_introduced.clear();
+      bv_introduced.clear();
+#ifdef GECODE_HAS_SET_VARS
+      sv_introduced.clear();
+#endif
+#ifdef GECODE_HAS_FLOAT_VARS
+      fv_introduced.clear();
+#endif
+    } else {
+      if ((mi.type() == MetaInfo::RESTART) && (mi.restart() != 0) &&
+          (_lns > 0) && (mi.last()==nullptr) && (_lnsInitialSolution.size()>0)) {
+        for (unsigned int i=iv_lns.size(); i--;) {
+          if (_random(99U) <= _lns) {
+            rel(*this, iv_lns[i], IRT_EQ, _lnsInitialSolution[i]);
+          }
+        }
+        return false;
+      } else if ((mi.type() == MetaInfo::RESTART) && (mi.restart() != 0) &&
+                 (_lns > 0) && mi.last()) {
+        const FlatZincSpace& last =
+          static_cast<const FlatZincSpace&>(*mi.last());
+
+        if (_neighbourhoods.get()) {
+          int idx = _random(static_cast<int>(_neighbourhoods->n.size()+2));
+          if (idx==_neighbourhoods->n.size()+1) {
+            for (auto& nbh : _neighbourhoods->n) {
+              for (unsigned int i=nbh.vars.size(); i--;) {
+                if (_random(99U) <= _lns) {
+                  if (nbh.isInt) {
+                    rel(*this, iv[nbh.vars[i]], IRT_EQ, last.iv[nbh.vars[i]]);
+                  } else {
+                    rel(*this, bv[nbh.vars[i]], IRT_EQ, last.bv[nbh.vars[i]]);
+                  }
+                }
+              }
+            }
+          } else if (idx==_neighbourhoods->n.size()) {
+            for (unsigned int i=iv.size(); i--;) {
+              if (_random(99U) <= _lns) {
+                rel(*this, iv[i], IRT_EQ, last.iv[i]);
+              }
+            }
+          } else {
+            Neighbourhood& nbh = _neighbourhoods->n[idx];
+            int kept = 0;
+            for (unsigned int i=nbh.vars.size(); i--;) {
+              if (_random(99U) <= _lns) {
+                kept++;
+                if (nbh.isInt) {
+                  rel(*this, iv[nbh.vars[i]], IRT_EQ, last.iv[nbh.vars[i]]);
+                } else {
+                  rel(*this, bv[nbh.vars[i]], IRT_EQ, last.bv[nbh.vars[i]]);
+                }
+              }
+            }
+          }
+        } else {
+          for (unsigned int i=iv_lns.size(); i--;) {
+            if (_random(99U) <= _lns) {
+              rel(*this, iv_lns[i], IRT_EQ, last.iv_lns[i]);
+            }
+          }
+        }
+        return false;
+      }
     }
     return true;
   }
-
+    
   Space*
   FlatZincSpace::copy(void) {
     return new FlatZincSpace(*this);
@@ -2043,8 +2207,8 @@ namespace Gecode { namespace FlatZinc {
   }
 
   void
-  FlatZincSpace::print(std::ostream& out, const Printer& p) const {
-    p.print(out, iv, bv
+  FlatZincSpace::print(std::ostream& out) const {
+    _printer->print(out, iv, bv
 #ifdef GECODE_HAS_SET_VARS
     , sv
 #endif
@@ -2095,9 +2259,8 @@ namespace Gecode { namespace FlatZinc {
   }
 
   void
-  FlatZincSpace::compare(const FlatZincSpace& s, std::ostream& out,
-                         const Printer& p) const {
-    p.printDiff(out, iv, s.iv, bv, s.bv
+  FlatZincSpace::compare(const FlatZincSpace& s, std::ostream& out) const {
+    _printer->printDiff(out, iv, s.iv, bv, s.bv
 #ifdef GECODE_HAS_SET_VARS
      , sv, s.sv
 #endif
@@ -2108,8 +2271,8 @@ namespace Gecode { namespace FlatZinc {
   }
 
   void
-  FlatZincSpace::shrinkArrays(Printer& p) {
-    p.shrinkArrays(*this, _optVar, _optVarIsInt, iv, bv
+  FlatZincSpace::shrinkArrays(void) {
+    _printer->shrinkArrays(*this, _optVar, _optVarIsInt, iv, bv
 #ifdef GECODE_HAS_SET_VARS
     , sv
 #endif

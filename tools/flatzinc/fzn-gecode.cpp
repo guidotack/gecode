@@ -42,7 +42,8 @@ int main(int argc, char** argv) {
 
   Support::Timer t_total;
   t_total.start();
-  FlatZinc::FlatZincOptions opt("Gecode/FlatZinc");
+  FlatZinc::FlatZincOptions* nopt = new FlatZinc::FlatZincOptions("Gecode/FlatZinc");
+  FlatZinc::FlatZincOptions& opt = *nopt;
   opt.parse(argc, argv);
 
   if (argc!=2) {
@@ -59,15 +60,12 @@ int main(int argc, char** argv) {
   Rnd rnd(opt.seed());
   try {
     if (!strcmp(filename, "-")) {
-      fg = FlatZinc::parse(cin, p, std::cerr, nullptr, rnd);
+      fg = FlatZinc::parse(cin, opt, p, std::cerr, nullptr, rnd);
     } else {
-      fg = FlatZinc::parse(filename, p, std::cerr, nullptr, rnd);
+      fg = FlatZinc::parse(filename, opt, p, std::cerr, nullptr, rnd);
     }
 
     if (fg) {
-      fg->createBranchers(p, fg->solveAnnotations(), opt,
-                          false, std::cerr);
-      fg->shrinkArrays(p);
       if (opt.output()) {
         std::ofstream os(opt.output());
         if (!os.good()) {
@@ -75,10 +73,10 @@ int main(int argc, char** argv) {
                     << std::endl;
           exit(EXIT_FAILURE);
         }
-        fg->run(os, p, opt, t_total);
+        fg->run(os, t_total);
         os.close();
       } else {
-        fg->run(std::cout, p, opt, t_total);
+        fg->run(std::cout, t_total);
       }
     } else {
       exit(EXIT_FAILURE);

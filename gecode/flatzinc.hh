@@ -39,6 +39,8 @@
 #define GECODE_FLATZINC_HH
 
 #include <iostream>
+#include <memory>
+#include <vector>
 
 #include <gecode/kernel.hh>
 #include <gecode/int.hh>
@@ -246,6 +248,7 @@ namespace Gecode { namespace FlatZinc {
       Gecode::Driver::UnsignedIntOption _nogoods_limit; ///< Depth limit for extracting no-goods
       Gecode::Driver::BoolOption        _interrupt; ///< Whether to catch SIGINT
       Gecode::Driver::DoubleOption      _step;        ///< Step option
+      Gecode::Driver::UnsignedIntOption _assets;        ///< Number of assets in a portfolio
       //@}
 
       /// \name Execution options
@@ -265,14 +268,14 @@ namespace Gecode { namespace FlatZinc {
       //@}
   public:
     /// Constructor
-    FlatZincOptions(const char* s)
-    : Gecode::BaseOptions(s),
+    FlatZincOptions(const std::string& s = std::string())
+    : Gecode::BaseOptions(s.c_str()),
       _solutions("n","number of solutions (0 = all, -1 = one/best)",-1),
       _allSolutions("a", "return all solutions (equal to -n 0)"),
       _threads("p","number of threads (0 = #processing units)",
                Gecode::Search::Config::threads),
       _free("f", "free search, no need to follow search-specification"),
-      _decay("decay","decay factor",0.99),
+      _decay("decay","decay factor",0.98),
       _c_d("c-d","recomputation commit distance",Gecode::Search::Config::c_d),
       _a_d("a-d","recomputation adaption distance",Gecode::Search::Config::a_d),
       _node("node","node cutoff (0 = none, solution mode)"),
@@ -289,6 +292,7 @@ namespace Gecode { namespace FlatZinc {
       _interrupt("interrupt","whether to catch Ctrl-C (true) or not (false)",
                  true),
       _step("step","step distance for float optimization",0.0),
+      _assets("assets","#portfolio assets (#engines)",0),
       _mode("mode","how to execute script",Gecode::SM_SOLUTION),
       _stat("s","emit statistics"),
       _output("o","file to send output to")
@@ -320,6 +324,7 @@ namespace Gecode { namespace FlatZinc {
       add(_step);
       add(_restart); add(_r_base); add(_r_scale);
       add(_nogoods); add(_nogoods_limit);
+      add(_assets);
       add(_mode); add(_stat);
       add(_output);
 #ifdef GECODE_HAS_CPPROFILER
@@ -357,6 +362,7 @@ namespace Gecode { namespace FlatZinc {
     unsigned long long int node(void) const { return _node.value(); }
     unsigned long long int fail(void) const { return _fail.value(); }
     double time(void) const { return _time.value(); }
+    unsigned int assets(void) const { return _assets.value(); }
     int seed(void) const { return _seed.value(); }
     double step(void) const { return _step.value(); }
     const char* output(void) const { return _output.value(); }
@@ -419,6 +425,18 @@ namespace Gecode { namespace FlatZinc {
   GECODE_FLATZINC_EXPORT
   extern Rnd defrnd;
 
+  class Neighbourhood {
+  public:
+    std::vector<int> vars;
+    bool isInt;
+    Neighbourhood(const std::vector<int>& vars0, bool isInt0) : vars(vars0), isInt(isInt0) {}
+  };
+  
+  class Neighbourhoods {
+  public:
+    std::vector<Neighbourhood> n;
+  };
+
   class FlatZincSpaceInitData;
 
   /**
@@ -435,6 +453,8 @@ namespace Gecode { namespace FlatZinc {
   protected:
     /// Initialisation data (only used for posting constraints)
     FlatZincSpaceInitData* _initData;
+    /// Options
+    std::shared_ptr<FlatZincOptions> _opt;
     /// Number of integer variables
     int intVarCount;
     /// Number of Boolean variables
@@ -455,6 +475,8 @@ namespace Gecode { namespace FlatZinc {
     /// Percentage of variables to keep in LNS (or 0 for no LNS)
     unsigned int _lns;
 
+    std::shared_ptr<Neighbourhoods> _neighbourhoods;
+    
     /// Initial solution to start the LNS (or nullptr for no LNS)
     IntSharedArray _lnsInitialSolution;
 
@@ -462,22 +484,25 @@ namespace Gecode { namespace FlatZinc {
     Rnd _random;
 
     /// Annotations on the solve item
-    AST::Array* _solveAnnotations;
+    std::shared_ptr<AST::Array> _solveAnnotations;
 
+    /// Printer
+    Printer* _printer;
+    
+    /// Random seed
+    unsigned int _seed;
+    
     /// Copy constructor
     FlatZincSpace(FlatZincSpace&);
   private:
     /// Run the search engine
-    template<template<class> class Engine>
+    template<template<class> class Engine, template<class> class Builder>
     void
-    runEngine(std::ostream& out, const Printer& p,
-              const FlatZincOptions& opt, Gecode::Support::Timer& t_total);
+    runEngine(std::ostream& out, Gecode::Support::Timer& t_total);
     /// Run the meta search engine
-    template<template<class> class Engine,
-             template<class, template<class> class> class Meta>
+    template<template<class> class Engine, template<class> class Builder>
     void
-    runMeta(std::ostream& out, const Printer& p,
-            const FlatZincOptions& opt, Gecode::Support::Timer& t_total);
+    runMeta(std::ostream& out, Gecode::Support::Timer& t_total);
     void
     branchWithPlugin(AST::Node* ann);
   public:
@@ -520,7 +545,7 @@ namespace Gecode { namespace FlatZinc {
     /// Whether the introduced variables still need to be copied
     bool needAuxVars;
     /// Construct empty space
-    FlatZincSpace(Rnd& random = defrnd);
+    FlatZincSpace(const FlatZincOptions& opt, Printer* p = NULL, Rnd& random = defrnd);
 
     /// Destructor
     ~FlatZincSpace(void);
@@ -552,11 +577,10 @@ namespace Gecode { namespace FlatZinc {
     void maximize(int var, bool isInt, AST::Array* annotation);
 
     /// Run the search
-    void run(std::ostream& out, const Printer& p,
-             const FlatZincOptions& opt, Gecode::Support::Timer& t_total);
+    void run(std::ostream& out, Gecode::Support::Timer& t_total);
 
     /// Produce output on \a out using \a p
-    void print(std::ostream& out, const Printer& p) const;
+    void print(std::ostream& out) const;
 #ifdef GECODE_HAS_CPPROFILER
     /// Get string representing the domains of variables (for cpprofiler)
     std::string getDomains(const Printer& p) const;
@@ -566,8 +590,7 @@ namespace Gecode { namespace FlatZinc {
     void compare(const Space& s, std::ostream& out) const;
     /// Compare this space with space \a s and print the differences on
     /// \a out using \a p
-    void compare(const FlatZincSpace& s, std::ostream& out,
-                 const Printer& p) const;
+    void compare(const FlatZincSpace& s, std::ostream& out) const;
 
     /**
      * \brief Remove all variables not needed for output
@@ -577,7 +600,7 @@ namespace Gecode { namespace FlatZinc {
      * not be called again.
      *
      */
-    void shrinkArrays(Printer& p);
+    void shrinkArrays(void);
 
     /// Return whether to solve a satisfaction or optimization problem
     Meth method(void) const;
@@ -596,8 +619,9 @@ namespace Gecode { namespace FlatZinc {
      * The seed for random branchers is given by the \a seed parameter.
      *
      */
-    void createBranchers(Printer& p, AST::Node* ann,
+    void createBranchers(AST::Node* ann,
                          FlatZincOptions& opt, bool ignoreUnknown,
+                         bool populateNeighbourhoods,
                          std::ostream& err = std::cerr);
 
     /// Return the solve item annotations
@@ -712,7 +736,7 @@ namespace Gecode { namespace FlatZinc {
    * Creates a new empty FlatZincSpace if \a fzs is nullptr.
    */
   GECODE_FLATZINC_EXPORT
-  FlatZincSpace* parse(const std::string& fileName,
+  FlatZincSpace* parse(const std::string& fileName, const FlatZincOptions& opt,
                        Printer& p, std::ostream& err = std::cerr,
                        FlatZincSpace* fzs=nullptr, Rnd& rnd=defrnd);
 
@@ -722,7 +746,7 @@ namespace Gecode { namespace FlatZinc {
    * Creates a new empty FlatZincSpace if \a fzs is nullptr.
    */
   GECODE_FLATZINC_EXPORT
-  FlatZincSpace* parse(std::istream& is,
+  FlatZincSpace* parse(std::istream& is, const FlatZincOptions& opt,
                        Printer& p, std::ostream& err = std::cerr,
                        FlatZincSpace* fzs=nullptr, Rnd& rnd=defrnd);
 
