@@ -1920,11 +1920,11 @@ namespace Gecode { namespace FlatZinc {
       Driver::CombinedStop::installCtrlHandler(true);
     {
 
-      SEBs sebs(_opt->assets()>=2 ? (_opt->assets()==2 ? 2 : 3) : 1);
+      SEBs sebs(n_assets>=2 ? (n_assets==2 ? 2 : 3) : 1);
       Search::Options o0;
       Search::Options o1;
       Search::Options o2;
-      if (_opt->assets()>=2) {
+      if (n_assets>=2) {
         o0.c_d = c_d;
         o0.a_d = a_d;
         o0.threads = asset_0_threads;
@@ -1933,6 +1933,8 @@ namespace Gecode { namespace FlatZinc {
         if (_opt->restart()==RM_NONE) {
           o1.c_d = c_d;
           o1.a_d = a_d;
+          o1.nogoods_limit = _opt->nogoods_limit();
+          o1.cutoff  = new Search::CutoffAppend(new Search::CutoffConstant(200), 5, new Search::CutoffGeometric(100, 1.5));
           sebs[1] = new Builder<FlatZincSpace>(o1);
         } else {
           o1.stop = Driver::CombinedStop::create(_opt->node(), _opt->fail(), _opt->time(),
@@ -1943,7 +1945,7 @@ namespace Gecode { namespace FlatZinc {
           o1.cutoff  = new Search::CutoffAppend(new Search::CutoffConstant(200), 5, Driver::createCutoff(*_opt));
           sebs[1] = rbs<FlatZincSpace,Engine>(o1);
         }
-        if (_opt->assets()>=3) {
+        if (n_assets>=3) {
           // Create LNS asset: single thread, constant cutoff
           o2.stop = Driver::CombinedStop::create(_opt->node(), _opt->fail(), _opt->time(),
                                                  true);
@@ -2106,7 +2108,7 @@ namespace Gecode { namespace FlatZinc {
   bool
   FlatZincSpace::slave(const MetaInfo& mi) {
     if (mi.type() == MetaInfo::PORTFOLIO) {
-      if (mi.asset()==1) {
+      if (mi.asset()!=0) {
         createBranchers(NULL, *_opt, false, mi.asset()==2, std::cerr);
       } else {
         createBranchers(solveAnnotations(), *_opt, false, mi.asset()==2, std::cerr);
